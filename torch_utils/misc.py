@@ -150,15 +150,23 @@ def named_params_and_buffers(module):
     assert isinstance(module, torch.nn.Module)
     return list(module.named_parameters()) + list(module.named_buffers())
 
+
 def copy_params_and_buffers(src_module, dst_module, require_all=False):
+    number_of_mismatches = 0
     assert isinstance(src_module, torch.nn.Module)
     assert isinstance(dst_module, torch.nn.Module)
     src_tensors = {name: tensor for name, tensor in named_params_and_buffers(src_module)}
     for name, tensor in named_params_and_buffers(dst_module):
         assert (name in src_tensors) or (not require_all)
-        if name in src_tensors:
-            tensor.copy_(src_tensors[name].detach()).requires_grad_(tensor.requires_grad)
-
+        # CHANGED from original repo, see https://github.com/NVlabs/stylegan2-ada-pytorch/issues/156
+        if name in src_tensors and 'embed' not in name:
+            try:
+                tensor.copy_(src_tensors[name].detach()).requires_grad_(tensor.requires_grad)
+            except RuntimeError as err:
+                print('mismatch:', name)
+                number_of_mismatches += 1
+    if number_of_mismatches > 0:
+        print(f'number of mismatches: {number_of_mismatches}')
 #----------------------------------------------------------------------------
 # Context manager for easily enabling/disabling DistributedDataParallel
 # synchronization.
