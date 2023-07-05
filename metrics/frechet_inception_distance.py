@@ -15,12 +15,13 @@ import numpy as np
 import scipy.linalg
 from . import metric_utils
 
-#----------------------------------------------------------------------------
+
+# ----------------------------------------------------------------------------
 
 def compute_fid(opts, max_real, num_gen):
     # Direct TorchScript translation of http://download.tensorflow.org/models/image/imagenet/inception-2015-12-05.tgz
     detector_url = 'https://nvlabs-fi-cdn.nvidia.com/stylegan2-ada-pytorch/pretrained/metrics/inception-2015-12-05.pt'
-    detector_kwargs = dict(return_features=True) # Return raw features before the softmax layer.
+    detector_kwargs = dict(return_features=True)  # Return raw features before the softmax layer.
 
     mu_real, sigma_real = metric_utils.compute_feature_stats_for_dataset(
         opts=opts, detector_url=detector_url, detector_kwargs=detector_kwargs,
@@ -34,8 +35,9 @@ def compute_fid(opts, max_real, num_gen):
         return float('nan')
 
     m = np.square(mu_gen - mu_real).sum()
-    s, _ = scipy.linalg.sqrtm(np.dot(sigma_gen, sigma_real), disp=False) # pylint: disable=no-member
+    # noinspection PyUnresolvedReferences
+    s, _ = scipy.linalg.sqrtm(np.dot(sigma_gen, sigma_real), disp=False)  # pylint: disable=no-member
     fid = np.real(m + np.trace(sigma_gen + sigma_real - s * 2))
     return float(fid)
 
-#----------------------------------------------------------------------------
+# ----------------------------------------------------------------------------
