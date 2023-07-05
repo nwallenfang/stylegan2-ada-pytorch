@@ -15,6 +15,7 @@ import json
 import tempfile
 import torch
 import sys
+
 sys.path.append('stylegan2\\')
 
 import dnnlib
@@ -27,11 +28,12 @@ from torch_utils import custom_ops
 # quick hack so the import line below works
 # need to fix this for later versions
 import os
+
+
 # src_path = os.path.dirname(os.path.abspath(__file__))
 # stylegan_path = os.path.join(src_path, 'models/generator/stylegan2/')
 # print('path:' + stylegan_path)
 # sys.path.insert(0, stylegan_path)
-
 
 
 # ----------------------------------------------------------------------------
@@ -130,7 +132,7 @@ def setup_training_loop_kwargs(
                                                        tensor_path=data, custom_name='gc10_pre_FFHQ', use_labels=True)
 
     # used to be num_workers = 2 or 3 but failed on Windows
-    args.data_loader_kwargs = dnnlib.EasyDict(pin_memory=True, num_workers=0) #, prefetch_factor=2)
+    args.data_loader_kwargs = dnnlib.EasyDict(pin_memory=True, num_workers=0)  # , prefetch_factor=2)
     try:
         training_set = dnnlib.util.construct_class_by_name(
             **args.training_set_kwargs)  # subclass of training.dataset.Dataset
@@ -190,6 +192,9 @@ def setup_training_loop_kwargs(
                           map=8),
         'cifar': dict(ref_gpus=2, kimg=100000, mb=64, mbstd=32, fmaps=1, lrate=0.0025, gamma=0.01, ema=500, ramp=0.05,
                       map=2),
+        'gc10': dict(ref_gpus=8, kimg=5000, mb=32, mbstd=16, fmaps=0.5, lrate=0.0004, gamma=10, ema=10, ramp=None,
+                     map=8),
+
     }
 
     assert cfg in cfg_specs
@@ -314,8 +319,8 @@ def setup_training_loop_kwargs(
         'bgc': dict(xflip=1, rotate90=1, xint=1, scale=1, rotate=1, aniso=1, xfrac=1, brightness=1, contrast=1,
                     lumaflip=1, hue=1, saturation=1),
         # our custom augmentation pipeline without 90 deg rotations
-        'bgc-gc10': dict(xflip=1, rotate90=0, xint=1, scale=1, rotate=1, aniso=1, xfrac=1, brightness=1, contrast=1,
-                    lumaflip=1, hue=1, saturation=1),
+        'bgc-gc10': dict(xflip=1, xint=1, scale=1, rotate=1, aniso=1, xfrac=1, brightness=1, contrast=1,
+                         lumaflip=1, hue=1, saturation=1),
         'bgcf': dict(xflip=1, rotate90=1, xint=1, scale=1, rotate=1, aniso=1, xfrac=1, brightness=1, contrast=1,
                      lumaflip=1, hue=1, saturation=1, imgfilter=1),
         'bgcfn': dict(xflip=1, rotate90=1, xint=1, scale=1, rotate=1, aniso=1, xfrac=1, brightness=1, contrast=1,
@@ -574,7 +579,6 @@ def main(ctx, outdir, dry_run, **config_kwargs):
             subprocess_fn(rank=0, args=args, temp_dir=temp_dir)
         else:
             torch.multiprocessing.spawn(fn=subprocess_fn, args=(args, temp_dir), nprocs=args.num_gpus)
-
 
 # ----------------------------------------------------------------------------
 
