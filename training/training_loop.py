@@ -99,6 +99,7 @@ def training_loop(
         augment_kwargs=None,  # Options for augmentation pipeline. None = disable.
         loss_kwargs={},  # Options for loss function.
         metrics=[],  # Metrics to evaluate during training.
+        metric_dataset_kwargs   = {},       # Options for metric dataset.
         random_seed=0,  # Global random seed.
         num_gpus=1,  # Number of GPUs participating in the training.
         rank=0,  # Rank of the current process in [0, num_gpus[.
@@ -109,10 +110,10 @@ def training_loop(
         G_reg_interval=4,  # How often to perform regularization for G? None = disable lazy regularization.
         D_reg_interval=16,  # How often to perform regularization for D? None = disable lazy regularization.
         augment_p=0,  # Initial value of augmentation probability.
-        ada_target=None,  # ADA target value. None = fixed p.
-        ada_interval=4,  # How often to perform ADA adjustment?
-        ada_kimg=500,
-        # ADA adjustment speed, measured in how many kimg it takes for p to increase/decrease by one unit.
+        apa_target              = None,     # APA target value. None = fixed p.
+        apa_interval            = 4,        # How often to perform APA adjustment?
+        apa_kimg                = 500,      # APA adjustment speed, measured in how many kimg it takes for p to increase/decrease by one unit.
+        with_dataaug            = False,    # Enable standard data augmentations for the discriminator inputs? Usually improve further thanks to the compatibility.
         total_kimg=25000,  # Total length of the training, measured in thousands of real images.
         kimg_per_tick=4,  # Progress snapshot interval.
         image_snapshot_ticks=50,  # How often to save image snapshots? None = disable.
@@ -180,13 +181,13 @@ def training_loop(
     if rank == 0:
         print('Setting up augmentation...')
     augment_pipe = None
-    ada_stats = None
-    if (augment_kwargs is not None) and (augment_p > 0 or ada_target is not None):
+    apa_stats = None
+    if (augment_kwargs is not None) and (augment_p > 0 or apa_target is not None):
         augment_pipe = dnnlib.util.construct_class_by_name(**augment_kwargs).train().requires_grad_(False).to(
             device)  # subclass of torch.nn.Module
         augment_pipe.p.copy_(torch.as_tensor(augment_p))
-        if ada_target is not None:
-            ada_stats = training_stats.Collector(regex='Loss/signs/real')
+        if apa_target is not None:
+            apa_stats = training_stats.Collector(regex='Loss/signs/real')
 
     # Distribute across GPUs.
     if rank == 0:
@@ -204,8 +205,7 @@ def training_loop(
     # Setup training phases.
     if rank == 0:
         print('Setting up training phases...')
-    loss = dnnlib.util.construct_class_by_name(device=device, **ddp_modules,
-                                               **loss_kwargs)  # subclass of training.loss.Loss
+    loss = dnnlib.util.construct_class_by_name(device=device, with_dataaug=with_dataaug, **ddp_modules, **loss_kwargs) # subclass of training.loss.Loss
     phases = []
     for name, module, opt_kwargs, reg_interval in [('G', G, G_opt_kwargs, G_reg_interval),
                                                    ('D', D, D_opt_kwargs, D_reg_interval)]:
@@ -327,11 +327,10 @@ def training_loop(
         cur_nimg += batch_size
         batch_idx += 1
 
-        # Execute ADA heuristic.
-        if (ada_stats is not None) and (batch_idx % ada_interval == 0):
-            ada_stats.update()
-            adjust = np.sign(ada_stats['Loss/signs/real'] - ada_target) * (batch_size * ada_interval) / (
-                        ada_kimg * 1000)
+        # Execute APA heuristic.
+        if (apa_stats is not None) and (batch_idx % apa_interval == 0):
+            apa_stats.update()
+            adjust = np.sign(apa_stats['Loss/signs/real'] - apa_target) * (batch_size * apa_interval) / (apa_kimg * 1000)
             augment_pipe.p.copy_((augment_pipe.p + adjust).max(misc.constant(0, device=device)))
 
         # Perform maintenance tasks once per tick.
@@ -398,8 +397,7 @@ def training_loop(
                 print('Evaluating metrics...')
             for metric in metrics:
                 result_dict = metric_main.calc_metric(metric=metric, G=snapshot_data['G_ema'],
-                                                      dataset_kwargs=training_set_kwargs, num_gpus=num_gpus, rank=rank,
-                                                      device=device)
+                    dataset_kwargs=metric_dataset_kwargs, num_gpus=num_gpus, rank=rank, device=device)
                 if rank == 0:
                     metric_main.report_metric(result_dict, run_dir=run_dir, snapshot_pkl=snapshot_pkl)
                 stats_metrics.update(result_dict.results)

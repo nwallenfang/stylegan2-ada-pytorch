@@ -235,6 +235,29 @@ def make_transform(
         canvas[(width - height) // 2 : (width + height) // 2, :] = img
         return canvas
 
+    def resize_long(width, height, img):
+        assert width == height, 'target witdh and height should be the same temporarily'
+        w = img.shape[1]
+        h = img.shape[0]
+        if width == w and height == h:
+            return img
+        if w > h:
+            ww = width
+            hh = int(np.round(width * h / w))
+        else:
+            hh = height
+            ww = int(np.round(height * w / h))
+        img = PIL.Image.fromarray(img, 'RGB')
+        img = img.resize((ww, hh), resample)
+        img = np.array(img)
+
+        canvas = np.zeros([height, width, 3], dtype=np.uint8)
+        if ww > hh:
+            canvas[(ww - hh) // 2 : (ww + hh) // 2, :] = img
+        else:
+            canvas[:, (hh - ww) // 2 : (hh + ww) // 2] = img
+        return canvas
+
     if transform is None:
         return functools.partial(scale, output_width, output_height)
     if transform == 'center-crop':
@@ -245,6 +268,10 @@ def make_transform(
         if (output_width is None) or (output_height is None):
             error ('must specify --width and --height when using ' + transform + ' transform')
         return functools.partial(center_crop_wide, output_width, output_height)
+    if transform == 'resize-long':
+        if (output_width is None) or (output_height is None):
+            error ('must specify --width and --height when using ' + transform + 'transform')
+        return functools.partial(resize_long, output_width, output_height)
     assert False, 'unknown transform'
 
 #----------------------------------------------------------------------------
@@ -307,7 +334,7 @@ def open_dest(dest: str) -> Tuple[str, Callable[[str, Union[bytes, str]], None],
 @click.option('--dest', help='Output directory or archive name for output dataset', required=True, metavar='PATH')
 @click.option('--max-images', help='Output only up to `max-images` images', type=int, default=None)
 @click.option('--resize-filter', help='Filter to use when resizing images for output resolution', type=click.Choice(['box', 'lanczos']), default='lanczos', show_default=True)
-@click.option('--transform', help='Input crop/resize mode', type=click.Choice(['center-crop', 'center-crop-wide']))
+@click.option('--transform', help='Input crop/resize mode', type=click.Choice(['center-crop', 'center-crop-wide', 'resize-long']))
 @click.option('--width', help='Output width', type=int)
 @click.option('--height', help='Output height', type=int)
 def convert_dataset(
@@ -320,7 +347,7 @@ def convert_dataset(
     width: Optional[int],
     height: Optional[int]
 ):
-    """Convert an image dataset into a dataset archive usable with StyleGAN2 ADA PyTorch.
+    """Convert an image dataset into a dataset archive usable with DeceiveD APA PyTorch.
 
     The input dataset format is guessed from the --source argument:
 
@@ -342,7 +369,7 @@ def convert_dataset(
     offer better training performance on network file systems.
 
     Images within the dataset archive will be stored as uncompressed PNG.
-    Uncompresed PNGs can be efficiently decoded in the training loop.
+    Uncompressed PNGs can be efficiently decoded in the training loop.
 
     Class labels are stored in a file called 'dataset.json' that is stored at the
     dataset root folder.  This file has the following structure:
@@ -352,7 +379,7 @@ def convert_dataset(
         "labels": [
             ["00000/img00000000.png",6],
             ["00000/img00000001.png",9],
-            ... repeated for every image in the datase
+            ... repeated for every image in the dataset
             ["00049/img00049999.png",1]
         ]
     }

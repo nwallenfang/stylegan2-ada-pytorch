@@ -48,7 +48,6 @@ def setup_training_loop_kwargs(
         # General options (not included in desc).
         gpus=None,  # Number of GPUs: <int>, default = 1 gpu
         snap=None,  # Snapshot interval: <int>, default = 50 ticks
-        metrics=None,  # List of metric names: [], ['fid50k_full'] (default), ...
         seed=None,  # Random seed: <int>, default = 0
 
         # Dataset.
@@ -57,6 +56,10 @@ def setup_training_loop_kwargs(
         subset=None,  # Train with only N images: <int>, default = all
         mirror=None,  # Augment dataset with x-flips: <bool>, default = False
 
+        # Metrics (not included in desc).
+        metrics      = None, # List of metric names: [], ['fid50k_full'] (default), ...
+        metricdata   = None, # Metric dataset (optional): <path>
+
         # Base config.
         cfg=None,  # Base config: 'auto' (default), 'stylegan2', 'paper256', 'paper512', 'paper1024', 'cifar'
         gamma=None,  # Override R1 gamma: <float>
@@ -64,11 +67,11 @@ def setup_training_loop_kwargs(
         batch=None,  # Override batch size: <int>
 
         # Discriminator augmentation.
-        aug=None,  # Augmentation mode: 'ada' (default), 'noaug', 'fixed'
+        aug          = None, # Augmentation mode: 'apa' (default), 'noaug', 'fixed'
         p=None,  # Specify p for 'fixed' (required): <float>
-        target=None,  # Override ADA target for 'ada': <float>, default = depends on aug
-        augpipe=None,
-        # Augmentation pipeline: 'blit', 'geom', 'color', 'filter', 'noise', 'cutout', 'bg', 'bgc' (default), ..., 'bgcfnc'
+        target       = None, # Override APA target for 'apa': <float>, default = depends on aug
+        augpipe      = None, # Augmentation pipeline: 'blit', 'geom', 'color', 'filter', 'noise', 'cutout', 'bg', 'bgc' (default), ..., 'bgcfnc'
+        with_dataaug = None, # Enable standard data augmentations for the discriminator inputs: <bool>, default = False
 
         # Transfer learning.
         resume=None,
@@ -85,7 +88,7 @@ def setup_training_loop_kwargs(
     args = dnnlib.EasyDict()
 
     # ------------------------------------------
-    # General options: gpus, snap, metrics, seed
+    # General options: gpus, snap, seed
     # ------------------------------------------
 
     if gpus is None:
@@ -102,14 +105,6 @@ def setup_training_loop_kwargs(
         raise UserError('--snap must be at least 1')
     args.image_snapshot_ticks = snap
     args.network_snapshot_ticks = snap
-
-    if metrics is None:
-        metrics = ['fid50k_full']
-    assert isinstance(metrics, list)
-    if not all(metric_main.is_valid_metric(metric) for metric in metrics):
-        raise UserError(
-            '\n'.join(['--metrics can only contain the following values:'] + metric_main.list_valid_metrics()))
-    args.metrics = metrics
 
     if seed is None:
         seed = 0
@@ -170,6 +165,30 @@ def setup_training_loop_kwargs(
         desc += '-mirror'
         args.training_set_kwargs.xflip = True
 
+    # ----------------------------
+    # Metrics: metrics, metricdata
+    # ----------------------------
+
+    if metrics is None:
+        metrics = ['fid50k_full']
+    assert isinstance(metrics, list)
+    if not all(metric_main.is_valid_metric(metric) for metric in metrics):
+        raise UserError('\n'.join(['--metrics can only contain the following values:'] + metric_main.list_valid_metrics()))
+    args.metrics = metrics
+
+    args.metric_dataset_kwargs = dnnlib.EasyDict(args.training_set_kwargs)
+    if metricdata is not None:
+        assert isinstance(metricdata, str)
+        args.metric_dataset_kwargs.path = metricdata
+        try:
+            metric_dataset = dnnlib.util.construct_class_by_name(**args.metric_dataset_kwargs)  # subclass of training.dataset.Dataset
+            args.metric_dataset_kwargs.resolution = metric_dataset.resolution  # be explicit about resolution
+            args.metric_dataset_kwargs.use_labels = metric_dataset.has_labels  # be explicit about labels
+            args.metric_dataset_kwargs.max_size = None  # no limit to the dataset for metrics
+            del metric_dataset # conserve memory
+        except IOError as err:
+            raise UserError(f'--metricdata: {err}')
+
     # ------------------------------------
     # Base config: cfg, gamma, kimg, batch
     # ------------------------------------
@@ -199,6 +218,7 @@ def setup_training_loop_kwargs(
 
     assert cfg in cfg_specs
     spec = dnnlib.EasyDict(cfg_specs[cfg])
+    spec.ref_gpus = gpus
     if cfg == 'auto':
         desc += f'{gpus:d}'
         spec.ref_gpus = gpus
@@ -264,13 +284,13 @@ def setup_training_loop_kwargs(
     # ---------------------------------------------------
 
     if aug is None:
-        aug = 'ada'
+        aug = 'apa'
     else:
         assert isinstance(aug, str)
         desc += f'-{aug}'
 
-    if aug == 'ada':
-        args.ada_target = 0.6
+    if aug == 'apa':
+        args.apa_target = 0.6
 
     elif aug == 'noaug':
         pass
@@ -293,12 +313,12 @@ def setup_training_loop_kwargs(
 
     if target is not None:
         assert isinstance(target, float)
-        if aug != 'ada':
-            raise UserError('--target can only be specified with --aug=ada')
+        if aug != 'apa':
+            raise UserError('--target can only be specified with --aug=apa')
         if not 0 <= target <= 1:
             raise UserError('--target must be between 0 and 1')
         desc += f'-target{target:g}'
-        args.ada_target = target
+        args.apa_target = target
 
     assert augpipe is None or isinstance(augpipe, str)
     if augpipe is None:
@@ -358,7 +378,7 @@ def setup_training_loop_kwargs(
         args.resume_pkl = resume  # custom path or url
 
     if resume != 'noresume':
-        args.ada_kimg = 100  # make ADA react faster at the beginning
+        args.apa_kimg = 100 # make APA react faster at the beginning
         args.ema_rampup = None  # disable EMA rampup
 
     if freezed is not None:
@@ -453,7 +473,6 @@ class CommaSeparatedList(click.ParamType):
 @click.option('--outdir', help='Where to save the results', required=True, metavar='DIR')
 @click.option('--gpus', help='Number of GPUs to use [default: 1]', type=int, metavar='INT')
 @click.option('--snap', help='Snapshot interval [default: 50 ticks]', type=int, metavar='INT')
-@click.option('--metrics', help='Comma-separated list or "none" [default: fid50k_full]', type=CommaSeparatedList())
 @click.option('--seed', help='Random seed [default: 0]', type=int, metavar='INT')
 @click.option('-n', '--dry-run', help='Print training options and exit', is_flag=True)
 # Dataset.
@@ -462,6 +481,11 @@ class CommaSeparatedList(click.ParamType):
               metavar='BOOL')
 @click.option('--subset', help='Train with only N images [default: all]', type=int, metavar='INT')
 @click.option('--mirror', help='Enable dataset x-flips [default: false]', type=bool, metavar='BOOL')
+
+# Metrics.
+@click.option('--metrics', help='Comma-separated list or "none" [default: fid50k_full]', type=CommaSeparatedList())
+@click.option('--metricdata', help='Dataset to evaluate metrics against (directory or zip) [default: same as training data]', metavar='PATH')
+
 # Base config.
 @click.option('--cfg', help='Base config [default: auto]',
               type=click.Choice(['auto', 'stylegan2', 'paper256', 'paper512', 'paper1024', 'cifar']))
@@ -469,11 +493,12 @@ class CommaSeparatedList(click.ParamType):
 @click.option('--kimg', help='Override training duration', type=int, metavar='INT')
 @click.option('--batch', help='Override batch size', type=int, metavar='INT')
 # Discriminator augmentation.
-@click.option('--aug', help='Augmentation mode [default: ada]', type=click.Choice(['noaug', 'ada', 'fixed']))
+@click.option('--aug', help='Augmentation mode [default: apa]', type=click.Choice(['noaug', 'apa', 'fixed']))
 @click.option('--p', help='Augmentation probability for --aug=fixed', type=float)
-@click.option('--target', help='ADA target value for --aug=ada', type=float)
-@click.option('--augpipe', help='Augmentation pipeline [default: bgc]', type=click.Choice(
-    ['blit', 'geom', 'color', 'filter', 'noise', 'cutout', 'bg', 'bgc', 'bgcf', 'bgcfn', 'bgcfnc']))
+@click.option('--target', help='APA target value for --aug=apa', type=float)
+@click.option('--augpipe', help='Augmentation pipeline [default: bgc]', type=click.Choice(['blit', 'geom', 'color', 'filter', 'noise', 'cutout', 'bg', 'bgc', 'bgcf', 'bgcfn', 'bgcfnc']))
+@click.option('--with-dataaug', help='Enable standard data augmentations for the discriminator inputs [default: false]', type=bool, metavar='BOOL')
+
 # Transfer learning.
 @click.option('--resume', help='Resume training [default: noresume]', metavar='PKL')
 @click.option('--freezed', help='Freeze-D [default: 0 layers]', type=int, metavar='INT')
@@ -491,21 +516,21 @@ def main(ctx, outdir, dry_run, **config_kwargs):
 
     \b
     # Train with custom dataset using 1 GPU.
-    python train_classifier.py --outdir=~/training-runs --data=~/mydataset.zip --gpus=1
+    python train.py --outdir=~/training-runs --data=~/mydataset.zip --gpus=1
 
     \b
     # Train class-conditional CIFAR-10 using 2 GPUs.
-    python train_classifier.py --outdir=~/training-runs --data=~/datasets/cifar10.zip \\
+    python train.py --outdir=~/training-runs --data=~/datasets/cifar10.zip \\
         --gpus=2 --cfg=cifar --cond=1
 
     \b
     # Transfer learn MetFaces from FFHQ using 4 GPUs.
-    python train_classifier.py --outdir=~/training-runs --data=~/datasets/metfaces.zip \\
+    python train.py --outdir=~/training-runs --data=~/datasets/metfaces.zip \\
         --gpus=4 --cfg=paper1024 --mirror=1 --resume=ffhq1024 --snap=10
 
     \b
     # Reproduce original StyleGAN2 config F.
-    python train_classifier.py --outdir=~/training-runs --data=~/datasets/ffhq.zip \\
+    python train.py --outdir=~/training-runs --data=~/datasets/ffhq.zip \\
         --gpus=8 --cfg=stylegan2 --mirror=1 --aug=noaug
 
     \b
