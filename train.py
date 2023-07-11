@@ -124,7 +124,7 @@ def setup_training_loop_kwargs(
         _, extension = os.path.splitext(data)
         if extension in ['.pt', '.pth']:
             args.training_set_kwargs = dnnlib.EasyDict(class_name='training.dataset.StyleGANDataset',
-                                                       tensor_path=data, custom_name='gc10_pre_FFHQ', use_labels=True)
+                                                       tensor_path=data, custom_name='gc10', use_labels=True)
 
     # used to be num_workers = 2 or 3 but failed on Windows
     args.data_loader_kwargs = dnnlib.EasyDict(pin_memory=True, num_workers=0)  # , prefetch_factor=2)
@@ -211,7 +211,7 @@ def setup_training_loop_kwargs(
                           map=8),
         'cifar': dict(ref_gpus=2, kimg=100000, mb=64, mbstd=32, fmaps=1, lrate=0.0025, gamma=0.01, ema=500, ramp=0.05,
                       map=2),
-        'config-gc10': dict(ref_gpus=8, kimg=5000, mb=32, mbstd=16, fmaps=0.5, lrate=0.0004, gamma=10, ema=10, ramp=None,
+        'config-gc10': dict(ref_gpus=1, kimg=5000, mb=32, mbstd=16, fmaps=0.5, g_lrate=0.0004, d_lrate=0.0001, gamma=5, ema=10, ramp=None,
                      map=8),
 
     }
@@ -241,9 +241,12 @@ def setup_training_loop_kwargs(
     args.G_kwargs.synthesis_kwargs.num_fp16_res = args.D_kwargs.num_fp16_res = 4  # enable mixed-precision training
     args.G_kwargs.synthesis_kwargs.conv_clamp = args.D_kwargs.conv_clamp = 256  # clamp activations to avoid float16 overflow
     args.D_kwargs.epilogue_kwargs.mbstd_group_size = spec.mbstd
-
-    args.G_opt_kwargs = dnnlib.EasyDict(class_name='torch.optim.Adam', lr=spec.lrate, betas=[0, 0.99], eps=1e-8)
-    args.D_opt_kwargs = dnnlib.EasyDict(class_name='torch.optim.Adam', lr=spec.lrate, betas=[0, 0.99], eps=1e-8)
+    if 'g_lrate' in spec and 'd_lrate' in spec:
+        args.G_opt_kwargs = dnnlib.EasyDict(class_name='torch.optim.Adam', lr=spec.g_lrate, betas=[0, 0.99], eps=1e-8)
+        args.D_opt_kwargs = dnnlib.EasyDict(class_name='torch.optim.Adam', lr=spec.d_lrate, betas=[0, 0.99], eps=1e-8)
+    else:
+        args.G_opt_kwargs = dnnlib.EasyDict(class_name='torch.optim.Adam', lr=spec.lrate, betas=[0, 0.99], eps=1e-8)
+        args.D_opt_kwargs = dnnlib.EasyDict(class_name='torch.optim.Adam', lr=spec.lrate, betas=[0, 0.99], eps=1e-8)
     args.loss_kwargs = dnnlib.EasyDict(class_name='training.loss.StyleGAN2Loss', r1_gamma=spec.gamma)
 
     args.total_kimg = spec.kimg
@@ -302,6 +305,15 @@ def setup_training_loop_kwargs(
     else:
         raise UserError(f'--aug={aug} not supported')
 
+    if with_dataaug is None:
+        with_dataaug = False
+    assert isinstance(with_dataaug, bool)
+    if with_dataaug:
+        if aug == 'noaug':
+            raise UserError(f'--with-dataaug=true cannot be specified with --aug=noaug')
+        desc += f'-wdataaug'
+    args.with_dataaug = with_dataaug
+
     if p is not None:
         assert isinstance(p, float)
         if aug != 'fixed':
@@ -338,9 +350,9 @@ def setup_training_loop_kwargs(
         'bg': dict(xflip=1, rotate90=1, xint=1, scale=1, rotate=1, aniso=1, xfrac=1),
         'bgc': dict(xflip=1, rotate90=1, xint=1, scale=1, rotate=1, aniso=1, xfrac=1, brightness=1, contrast=1,
                     lumaflip=1, hue=1, saturation=1),
-        # our custom augmentation pipeline without 90 deg rotations
-        'bgc-gc10': dict(xflip=1, xint=1, scale=1, rotate=1, aniso=1, xfrac=1, brightness=1, contrast=1,
-                         lumaflip=1, hue=1, saturation=1),
+        # our custom augmentation pipeline without 90 deg rotations, without arbitrary rotations
+        'bgc-gc10': dict(xflip=1, xint=1, scale=1, xfrac=1, brightness=1, contrast=1,
+                         lumaflip=1, saturation=1, imgfilter=1),
         'bgcf': dict(xflip=1, rotate90=1, xint=1, scale=1, rotate=1, aniso=1, xfrac=1, brightness=1, contrast=1,
                      lumaflip=1, hue=1, saturation=1, imgfilter=1),
         'bgcfn': dict(xflip=1, rotate90=1, xint=1, scale=1, rotate=1, aniso=1, xfrac=1, brightness=1, contrast=1,
