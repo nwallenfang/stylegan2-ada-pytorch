@@ -11,9 +11,9 @@
 import copy
 import os
 from time import perf_counter
+from typing import Optional
 
 import PIL.Image
-import click
 import imageio
 import numpy as np
 import torch
@@ -21,11 +21,13 @@ import torch.nn.functional as F
 
 import dnnlib
 import legacy
+from sample_augment.utils import log
 
 
 def project(
         G,
         target: torch.Tensor,  # [C,H,W] and dynamic range [0,255], W & H must match G output resolution
+        target_class_idx: Optional[int],
         *,
         num_steps=1000,
         w_avg_samples=10000,
@@ -49,7 +51,16 @@ def project(
     # Compute w stats.
     logprint(f'Computing W midpoint and stddev using {w_avg_samples} samples...')
     z_samples = np.random.RandomState(123).randn(w_avg_samples, G.z_dim)
-    w_samples = G.mapping(torch.from_numpy(z_samples).to(device), None)  # [N, L, C]
+
+    # need to add class-conditional info,
+    # see https://github.com/NVlabs/stylegan2-ada-pytorch/issues/148#issuecomment-885722079
+    label = torch.zeros([1, G.c_dim], device=device)
+    if G.c_dim != 0:
+        if target_class_idx is None:
+            log.error('Must specify class label with --class when using a conditional network')
+        label[:, target_class_idx] = 1
+
+    w_samples = G.mapping(torch.from_numpy(z_samples).to(device), torch.cat([label] * w_avg_samples, dim=0))
     w_samples = w_samples[:, :1, :].cpu().numpy().astype(np.float32)  # [N, 1, C]
     w_avg = np.mean(w_samples, axis=0, keepdims=True)  # [1, 1, C]
     w_std = (np.sum((w_samples - w_avg) ** 2) / w_avg_samples) ** 0.5
@@ -134,17 +145,18 @@ def project(
 
 # ----------------------------------------------------------------------------
 
-@click.command()
-@click.option('--network', 'network_pkl', help='Network pickle filename', required=True)
-@click.option('--target', 'target_fname', help='Target image file to project to', required=True, metavar='FILE')
-@click.option('--num-steps', help='Number of optimization steps', type=int, default=1000, show_default=True)
-@click.option('--seed', help='Random seed', type=int, default=303, show_default=True)
-@click.option('--save-video', help='Save an mp4 video of optimization progress', type=bool, default=True,
-              show_default=True)
-@click.option('--outdir', help='Where to save the output images', required=True, metavar='DIR')
+# @click.command()
+# @click.option('--network', 'network_pkl', help='Network pickle filename', required=True)
+# @click.option('--target', 'target_fname', help='Target image file to project to', required=True, metavar='FILE')
+# @click.option('--num-steps', help='Number of optimization steps', type=int, default=1000, show_default=True)
+# @click.option('--seed', help='Random seed', type=int, default=303, show_default=True)
+# @click.option('--save-video', help='Save an mp4 video of optimization progress', type=bool, default=True,
+#               show_default=True)
+# @click.option('--outdir', help='Where to save the output images', required=True, metavar='DIR')
 def run_projection(
         network_pkl: str,
         target_fname: str,
+        target_class: int,
         outdir: str,
         save_video: bool,
         seed: int,
@@ -163,9 +175,15 @@ def run_projection(
 
     # Load networks.
     print('Loading networks from "%s"...' % network_pkl)
-    device = torch.device('cuda')
+    # device = torch.device('cuda')
+    device = torch.device('cuda') if torch.cuda.is_available() else torch.device('cpu')
+
     with dnnlib.util.open_url(network_pkl) as fp:
         G = legacy.load_network_pkl(fp)['G_ema'].requires_grad_(False).to(device)  # type: ignore
+        if device.type == 'cpu':
+            # see https://github.com/NVlabs/stylegan2-ada-pytorch/issues/105
+            import functools
+            G.forward = functools.partial(G.forward, force_fp32=True)
 
     # Load target image.
     target_pil = PIL.Image.open(target_fname).convert('RGB')
@@ -179,7 +197,8 @@ def run_projection(
     start_time = perf_counter()
     projected_w_steps = project(
         G,
-        target=torch.tensor(target_uint8.transpose([2, 0, 1]), device=device),  # pylint: disable=not-callable
+        target=torch.tensor(target_uint8.transpose([2, 0, 1]), device=device),
+        target_class_idx=1,
         num_steps=num_steps,
         device=device,
         verbose=True
