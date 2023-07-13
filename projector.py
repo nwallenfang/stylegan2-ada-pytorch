@@ -157,6 +157,8 @@ def run_projection(
         network_pkl: str,
         target_fname: str,
         target_class: int,
+        target_classname: str,
+        projected_fname: str,
         outdir: str,
         save_video: bool,
         seed: int,
@@ -198,7 +200,7 @@ def run_projection(
     projected_w_steps = project(
         G,
         target=torch.tensor(target_uint8.transpose([2, 0, 1]), device=device),
-        target_class_idx=1,
+        target_class_idx=target_class,
         num_steps=num_steps,
         device=device,
         verbose=True
@@ -218,13 +220,13 @@ def run_projection(
         video.close()
 
     # Save final projected frame and W vector.
-    target_pil.save(f'{outdir}/target.png')
+    target_pil.save(f'{outdir}/target_{target_classname}_{projected_fname}.png')
     projected_w = projected_w_steps[-1]
     synth_image = G.synthesis(projected_w.unsqueeze(0), noise_mode='const')
     synth_image = (synth_image + 1) * (255 / 2)
     synth_image = synth_image.permute(0, 2, 3, 1).clamp(0, 255).to(torch.uint8)[0].cpu().numpy()
-    PIL.Image.fromarray(synth_image, 'RGB').save(f'{outdir}/proj.png')
-    np.savez(f'{outdir}/projected_w.npz', w=projected_w.unsqueeze(0).cpu().numpy())
+    PIL.Image.fromarray(synth_image, 'RGB').save(f'{outdir}/proj_{target_classname}_{projected_fname}.png')
+    np.savez(f'{outdir}/proj_w_{target_classname}_{projected_fname}.npz', w=projected_w.unsqueeze(0).cpu().numpy())
 
 
 # ----------------------------------------------------------------------------

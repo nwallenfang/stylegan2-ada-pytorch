@@ -211,7 +211,9 @@ def setup_training_loop_kwargs(
                           map=8),
         'cifar': dict(ref_gpus=2, kimg=100000, mb=64, mbstd=32, fmaps=1, lrate=0.0025, gamma=0.01, ema=500, ramp=0.05,
                       map=2),
-        'config-gc10': dict(ref_gpus=1, kimg=5000, mb=32, mbstd=16, fmaps=0.5, g_lrate=0.0004, d_lrate=0.0001, gamma=5, ema=10, ramp=None,
+        'config-gc10': dict(ref_gpus=1, kimg=25000, mb=32, mbstd=16, fmaps=0.5, g_lrate=0.0004, d_lrate=0.0001, gamma=5, ema=10, ramp=None,
+                     map=8),
+        'config-gc10-continue': dict(ref_gpus=1, kimg=15000, mb=32, mbstd=16, fmaps=0.5, g_lrate=0.0004, d_lrate=0.0001, gamma=2.5, ema=10, ramp=None,
                      map=8),
 
     }
