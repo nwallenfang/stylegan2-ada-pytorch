@@ -254,7 +254,8 @@ class StyleGANDataset(Dataset):
         self.data = tensors[0].numpy().astype(np.uint8)
 
         # expecting the labels to be integer starting from 0 to number of classes-1
-        self.labels = tensors[1].numpy().astype(np.int64)
+        # it seems for multilabels this stylegan expects float32 labels instead of int64
+        self.labels = tensors[1].numpy().astype(np.float32)
         
         super().__init__(name=custom_name, raw_shape=self.data.shape, **kwargs)
 
@@ -263,3 +264,7 @@ class StyleGANDataset(Dataset):
 
     def _load_raw_image(self, raw_idx):
         return self.data[raw_idx]
+    
+    def get_label(self, idx):
+        # TODO change get_label to return multilabel info instead of single label
+        return super().get_label(idx)
