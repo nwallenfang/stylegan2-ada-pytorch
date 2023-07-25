@@ -17,6 +17,7 @@ import PIL.Image
 import imageio
 import numpy as np
 import torch
+# noinspection PyPep8Naming
 import torch.nn.functional as F
 
 import dnnlib
@@ -40,6 +41,8 @@ def project(
         verbose=False,
         device: torch.device
 ):
+    print("Target:", target.shape)
+    print((G.img_channels, G.img_resolution, G.img_resolution))
     assert target.shape == (G.img_channels, G.img_resolution, G.img_resolution)
 
     def logprint(*args):
@@ -129,7 +132,7 @@ def project(
         optimizer.zero_grad(set_to_none=True)
         loss.backward()
         optimizer.step()
-        logprint(f'step {step + 1:>4d}/{num_steps}: dist {dist:<4.2f} loss {float(loss):<5.2f}')
+        # logprint(f'step {step + 1:>4d}/{num_steps}: dist {dist:<4.2f} loss {float(loss):<5.2f}')
 
         # Save projected W for each optimization step.
         w_out[step] = w_opt.detach()[0]
@@ -144,6 +147,17 @@ def project(
 
 
 # ----------------------------------------------------------------------------
+def load_model(network_pkl):
+    print('Loading networks from "%s"...' % network_pkl)
+    device = torch.device('cuda') if torch.cuda.is_available() else torch.device('cpu')
+    with dnnlib.util.open_url(network_pkl) as fp:
+        G = legacy.load_network_pkl(fp)['G_ema'].requires_grad_(False).to(device)  # type: ignore
+        if device.type == 'cpu':
+            # see https://github.com/NVlabs/stylegan2-ada-pytorch/issues/105
+            import functools
+            G.forward = functools.partial(G.forward, force_fp32=True)
+    return G, device
+
 
 # @click.command()
 # @click.option('--network', 'network_pkl', help='Network pickle filename', required=True)
@@ -154,8 +168,9 @@ def project(
 #               show_default=True)
 # @click.option('--outdir', help='Where to save the output images', required=True, metavar='DIR')
 def run_projection(
-        network_pkl: str,
-        target_fname: str,
+        G,
+        device,
+        target_uint8: np.ndarray,
         target_class: int,
         target_classname: str,
         projected_fname: str,
@@ -175,31 +190,19 @@ def run_projection(
     np.random.seed(seed)
     torch.manual_seed(seed)
 
-    # Load networks.
-    print('Loading networks from "%s"...' % network_pkl)
-    # device = torch.device('cuda')
-    device = torch.device('cuda') if torch.cuda.is_available() else torch.device('cpu')
-
-    with dnnlib.util.open_url(network_pkl) as fp:
-        G = legacy.load_network_pkl(fp)['G_ema'].requires_grad_(False).to(device)  # type: ignore
-        if device.type == 'cpu':
-            # see https://github.com/NVlabs/stylegan2-ada-pytorch/issues/105
-            import functools
-            G.forward = functools.partial(G.forward, force_fp32=True)
-
     # Load target image.
-    target_pil = PIL.Image.open(target_fname).convert('RGB')
-    w, h = target_pil.size
-    s = min(w, h)
-    target_pil = target_pil.crop(((w - s) // 2, (h - s) // 2, (w + s) // 2, (h + s) // 2))
-    target_pil = target_pil.resize((G.img_resolution, G.img_resolution), PIL.Image.LANCZOS)
-    target_uint8 = np.array(target_pil, dtype=np.uint8)
+    # target_pil = PIL.Image.open(target_fname).convert('RGB')
+    # w, h = target_pil.size
+    # s = min(w, h)
+    # target_pil = target_pil.crop(((w - s) // 2, (h - s) // 2, (w + s) // 2, (h + s) // 2))
+    # target_pil = target_pil.resize((G.img_resolution, G.img_resolution), PIL.Image.LANCZOS)
+    # target_uint8 = np.array(target_pil, dtype=np.uint8)
 
     # Optimize projection.
     start_time = perf_counter()
     projected_w_steps = project(
         G,
-        target=torch.tensor(target_uint8.transpose([2, 0, 1]), device=device),
+        target=torch.tensor(target_uint8, device=device),
         target_class_idx=target_class,
         num_steps=num_steps,
         device=device,
@@ -220,18 +223,11 @@ def run_projection(
         video.close()
 
     # Save final projected frame and W vector.
-    target_pil.save(f'{outdir}/target_{target_classname}_{projected_fname}.png')
+    print("shape before saving hue:", target_uint8.shape)
+    PIL.Image.fromarray(target_uint8.transpose((1, 2, 0))).save(f'{outdir}/target_{target_classname}_{projected_fname}.png')
     projected_w = projected_w_steps[-1]
     synth_image = G.synthesis(projected_w.unsqueeze(0), noise_mode='const')
     synth_image = (synth_image + 1) * (255 / 2)
     synth_image = synth_image.permute(0, 2, 3, 1).clamp(0, 255).to(torch.uint8)[0].cpu().numpy()
     PIL.Image.fromarray(synth_image, 'RGB').save(f'{outdir}/proj_{target_classname}_{projected_fname}.png')
     np.savez(f'{outdir}/proj_w_{target_classname}_{projected_fname}.npz', w=projected_w.unsqueeze(0).cpu().numpy())
-
-
-# ----------------------------------------------------------------------------
-
-if __name__ == "__main__":
-    run_projection()  # pylint: disable=no-value-for-parameter
-
-# ----------------------------------------------------------------------------
