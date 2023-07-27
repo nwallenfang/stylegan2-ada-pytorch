@@ -14,8 +14,11 @@ import pickle
 import psutil
 import PIL.Image
 import numpy as np
+
+import comet_ml
 import torch
 import dnnlib
+
 from torch_utils import misc
 from torch_utils import training_stats
 from torch_utils.ops import conv2d_gradfix
@@ -253,6 +256,12 @@ def training_loop(
         stats_jsonl = open(os.path.join(run_dir, 'stats.jsonl'), 'wt')
         try:
             import torch.utils.tensorboard as tensorboard
+            # try to upload the tensorboard metrics to comet_ml
+            # please ignore its presence here.. or fix it up and generate a new one
+            experiment = comet_ml.Experiment(
+                api_key="XEhJP7MlCdIafCngPl29ZjolT",
+                project_name="StyleGAN Training"
+            )
             stats_tfevents = tensorboard.SummaryWriter(run_dir)
         except ImportError as err:
             print('Skipping tfevents export:', err)

@@ -11,7 +11,6 @@
 import copy
 import os
 from time import perf_counter
-from typing import Optional
 
 import PIL.Image
 import imageio
@@ -19,6 +18,7 @@ import numpy as np
 import torch
 # noinspection PyPep8Naming
 import torch.nn.functional as F
+from torch import Tensor
 
 import dnnlib
 import legacy
@@ -27,8 +27,8 @@ from sample_augment.utils import log
 
 def project(
         G,
-        target: torch.Tensor,  # [C,H,W] and dynamic range [0,255], W & H must match G output resolution
-        target_class_idx: Optional[int],
+        target_image: torch.Tensor,  # [C,H,W] and dynamic range [0,255], W & H must match G output resolution
+        target_class: torch.Tensor,
         *,
         num_steps=1000,
         w_avg_samples=10000,
@@ -41,9 +41,9 @@ def project(
         verbose=False,
         device: torch.device
 ):
-    print("Target:", target.shape)
+    print("Target:", target_image.shape)
     print((G.img_channels, G.img_resolution, G.img_resolution))
-    assert target.shape == (G.img_channels, G.img_resolution, G.img_resolution)
+    assert target_image.shape == (G.img_channels, G.img_resolution, G.img_resolution)
 
     def logprint(*args):
         if verbose:
@@ -57,11 +57,8 @@ def project(
 
     # need to add class-conditional info,
     # see https://github.com/NVlabs/stylegan2-ada-pytorch/issues/148#issuecomment-885722079
-    label = torch.zeros([1, G.c_dim], device=device)
-    if G.c_dim != 0:
-        if target_class_idx is None:
-            log.error('Must specify class label with --class when using a conditional network')
-        label[:, target_class_idx] = 1
+    assert target_class.size()[1] == G.c_dim
+    label = target_class.to(device)
 
     w_samples = G.mapping(torch.from_numpy(z_samples).to(device), torch.cat([label] * w_avg_samples, dim=0))
     w_samples = w_samples[:, :1, :].cpu().numpy().astype(np.float32)  # [N, 1, C]
@@ -77,7 +74,7 @@ def project(
         vgg16 = torch.jit.load(f).eval().to(device)
 
     # Features for target image.
-    target_images = target.unsqueeze(0).to(device).to(torch.float32)
+    target_images = target_image.unsqueeze(0).to(device).to(torch.float32)
     if target_images.shape[2] > 256:
         target_images = F.interpolate(target_images, size=(256, 256), mode='area')
     target_features = vgg16(target_images, resize_images=False, return_lpips=True)
@@ -159,19 +156,11 @@ def load_model(network_pkl):
     return G, device
 
 
-# @click.command()
-# @click.option('--network', 'network_pkl', help='Network pickle filename', required=True)
-# @click.option('--target', 'target_fname', help='Target image file to project to', required=True, metavar='FILE')
-# @click.option('--num-steps', help='Number of optimization steps', type=int, default=1000, show_default=True)
-# @click.option('--seed', help='Random seed', type=int, default=303, show_default=True)
-# @click.option('--save-video', help='Save an mp4 video of optimization progress', type=bool, default=True,
-#               show_default=True)
-# @click.option('--outdir', help='Where to save the output images', required=True, metavar='DIR')
 def run_projection(
         G,
         device,
-        target_uint8: np.ndarray,
-        target_class: int,
+        target_image_uint8: np.ndarray,
+        target_class: Tensor,
         target_classname: str,
         projected_fname: str,
         outdir: str,
@@ -179,36 +168,23 @@ def run_projection(
         seed: int,
         num_steps: int
 ):
-    """Project given image to the latent space of pretrained network pickle.
-
-    Examples:
-
-    \b
-    python projector.py --outdir=out --target=~/mytargetimg.png \\
-        --network=https://nvlabs-fi-cdn.nvidia.com/stylegan2-ada-pytorch/pretrained/ffhq.pkl
-    """
+    """Project given image to the latent space of pretrained network pickle."""
     np.random.seed(seed)
     torch.manual_seed(seed)
 
-    # Load target image.
-    # target_pil = PIL.Image.open(target_fname).convert('RGB')
-    # w, h = target_pil.size
-    # s = min(w, h)
-    # target_pil = target_pil.crop(((w - s) // 2, (h - s) // 2, (w + s) // 2, (h + s) // 2))
-    # target_pil = target_pil.resize((G.img_resolution, G.img_resolution), PIL.Image.LANCZOS)
-    # target_uint8 = np.array(target_pil, dtype=np.uint8)
-
     # Optimize projection.
     start_time = perf_counter()
+    if target_class.dim() == 1:
+        target_class = target_class.unsqueeze(0)
     projected_w_steps = project(
         G,
-        target=torch.tensor(target_uint8, device=device),
-        target_class_idx=target_class,
+        target_image=torch.tensor(target_image_uint8, device=device),
+        target_class=target_class,
         num_steps=num_steps,
         device=device,
         verbose=True
     )
-    print(f'Elapsed: {(perf_counter() - start_time):.1f} s')
+    log.info(f'Done projecting {target_classname}, elapsed: {(perf_counter() - start_time):.1f} s')
 
     # Render debug output: optional video and projected image and W vector.
     os.makedirs(outdir, exist_ok=True)
@@ -219,15 +195,17 @@ def run_projection(
             synth_image = G.synthesis(projected_w.unsqueeze(0), noise_mode='const')
             synth_image = (synth_image + 1) * (255 / 2)
             synth_image = synth_image.permute(0, 2, 3, 1).clamp(0, 255).to(torch.uint8)[0].cpu().numpy()
-            video.append_data(np.concatenate([target_uint8, synth_image], axis=1))
+            video.append_data(np.concatenate([target_image_uint8, synth_image], axis=1))
         video.close()
 
     # Save final projected frame and W vector.
-    print("shape before saving hue:", target_uint8.shape)
-    PIL.Image.fromarray(target_uint8.transpose((1, 2, 0))).save(f'{outdir}/target_{target_classname}_{projected_fname}.png')
+    # print("shape before saving hue:", target_image_uint8.shape)
+    # TODO save the multilabel vector this was projected with !!
+    PIL.Image.fromarray(target_image_uint8.transpose((1, 2, 0))) \
+        .save(f'{outdir}/target_{projected_fname}.png')
     projected_w = projected_w_steps[-1]
     synth_image = G.synthesis(projected_w.unsqueeze(0), noise_mode='const')
     synth_image = (synth_image + 1) * (255 / 2)
     synth_image = synth_image.permute(0, 2, 3, 1).clamp(0, 255).to(torch.uint8)[0].cpu().numpy()
-    PIL.Image.fromarray(synth_image, 'RGB').save(f'{outdir}/proj_{target_classname}_{projected_fname}.png')
-    np.savez(f'{outdir}/proj_w_{target_classname}_{projected_fname}.npz', w=projected_w.unsqueeze(0).cpu().numpy())
+    PIL.Image.fromarray(synth_image, 'RGB').save(f'{outdir}/proj_{projected_fname}.png')
+    np.savez(f'{outdir}/proj_{projected_fname}.npz', w=projected_w.unsqueeze(0).cpu().numpy())
