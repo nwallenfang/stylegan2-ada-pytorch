@@ -38,21 +38,12 @@ def project(
         lr_rampup_length=0.05,
         noise_ramp_length=0.75,
         regularize_noise_weight=1e5,
-        verbose=False,
         device: torch.device
 ):
-    print("Target:", target_image.shape)
-    print((G.img_channels, G.img_resolution, G.img_resolution))
     assert target_image.shape == (G.img_channels, G.img_resolution, G.img_resolution)
-
-    def logprint(*args):
-        if verbose:
-            print(*args)
 
     G = copy.deepcopy(G).eval().requires_grad_(False).to(device)  # type: ignore
 
-    # Compute w stats.
-    logprint(f'Computing W midpoint and stddev using {w_avg_samples} samples...')
     z_samples = np.random.RandomState(123).randn(w_avg_samples, G.z_dim)
 
     # need to add class-conditional info,
