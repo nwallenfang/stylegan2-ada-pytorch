@@ -172,8 +172,7 @@ def run_projection(
         target_image=torch.tensor(target_image_uint8, device=device),
         target_class=target_class,
         num_steps=num_steps,
-        device=device,
-        verbose=True
+        device=device
     )
     log.info(f'Done projecting {target_classname}, elapsed: {(perf_counter() - start_time):.1f} s')
 
