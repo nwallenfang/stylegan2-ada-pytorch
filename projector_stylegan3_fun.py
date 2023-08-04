@@ -4,17 +4,16 @@ This script is taken from
 NVIDIA StyleGAN license
 """
 import copy
-import os
+from pathlib import Path
 from time import perf_counter
 from typing import Tuple
 
 import PIL.Image
-import imageio
 import numpy as np
 import torch
 # noinspection PyPep8Naming
 import torch.nn.functional as F
-from tqdm import tqdm
+import torchvision.transforms
 
 from dnnlib.util import format_time
 from metrics import metric_utils
@@ -22,13 +21,14 @@ from sample_augment.models.stylegan2 import gen_utils
 from sample_augment.models.stylegan2.network_features import VGG16FeaturesNVIDIA, DiscriminatorFeatures
 from sample_augment.models.stylegan2.ssim import SSIM  # from https://github.com/Po-Hsun-Su/pytorch-ssim
 from sample_augment.utils import log
+from sample_augment.utils.path_utils import shared_dir
 
 
 # noinspection PyUnboundLocalVariable
 def project(
         G,
         target: PIL.Image.Image,  # [C,H,W] and dynamic range [0,255], W & H must match G output resolution
-        class_label: torch.Tensor,  # [1, G.c_dim]
+        target_class: torch.Tensor,  # [1, G.c_dim]
         *,
         projection_seed: int,
         truncation_psi: float,
@@ -60,9 +60,11 @@ def project(
     # Compute w stats.
     # TODO enable conditional support
     z_samples = np.random.RandomState(123).randn(w_avg_samples, G.z_dim)
-    assert class_label.shape == (1, G.c_dim), f"expected shape {(1, G.c_dim)}, got {class_label.shape}"
-    class_label = class_label.to(device)
-    w_samples = G.mapping(torch.from_numpy(z_samples).to(device), class_label.repeat(w_avg_samples, 1))  # [N, L, C]
+    if target_class.ndim == 1:
+        target_class = target_class.unsqueeze(0)
+    assert target_class.shape == (1, G.c_dim), f"expected shape {(1, G.c_dim)}, got {target_class.shape}"
+    target_class = target_class.to(device)
+    w_samples = G.mapping(torch.from_numpy(z_samples).to(device), target_class.repeat(w_avg_samples, 1))  # [N, L, C]
     if project_in_wplus:  # Thanks to @pbaylies for a clean way on how to do this
         print('Projecting in W+ latent space...')
         if start_wavg:
@@ -71,7 +73,7 @@ def project(
         else:
             print(f'Starting from a random vector (seed: {projection_seed})...')
             z = np.random.RandomState(projection_seed).randn(1, G.z_dim)
-            w_avg = G.mapping(torch.from_numpy(z).to(device), class_label)  # [1, L, C]
+            w_avg = G.mapping(torch.from_numpy(z).to(device), target_class)  # [1, L, C]
             w_avg = G.mapping.w_avg + truncation_psi * (w_avg - G.mapping.w_avg)
     else:
         print('Projecting in W latent space...')
@@ -82,7 +84,7 @@ def project(
         else:
             print(f'Starting from a random vector (seed: {projection_seed})...')
             z = np.random.RandomState(projection_seed).randn(1, G.z_dim)
-            w_avg = G.mapping(torch.from_numpy(z).to(device), class_label)[:, :1, :]  # [1, 1, C]; fake w_avg
+            w_avg = G.mapping(torch.from_numpy(z).to(device), target_class)[:, :1, :]  # [1, 1, C]; fake w_avg
             w_avg = G.mapping.w_avg + truncation_psi * (w_avg - G.mapping.w_avg)
     w_std = (torch.sum((w_samples - w_avg) ** 2) / w_avg_samples) ** 0.5
     # Setup noise inputs (only for StyleGAN2 models)
@@ -100,7 +102,7 @@ def project(
 
     if loss_paper in ['sgan2', 'im2sgan']:
         # Load the VGG16 feature detector.
-        url = 'https://api.ngc.nvidia.com/v2/models/nvidia/research/stylegan3/versions/1/files/metrics/vgg16.pkl'
+        url = 'https://nvlabs-fi-cdn.nvidia.com/stylegan2-ada-pytorch/pretrained/metrics/vgg16.pt'
         vgg16 = metric_utils.get_feature_detector(url, device=device)
 
     # Define the target features and possible new losses
@@ -176,35 +178,36 @@ def project(
         # Downsample image to 256x256 if it's larger than that. VGG was built for 224x224 images.
         synth_images = (synth_images + 1) * (255 / 2)
         if synth_images.shape[2] > 256:
+            print("downsample bruhh.")
             synth_images = F.interpolate(synth_images, size=(256, 256), mode='area')
 
         # Reshape synthetic images if G was trained with grayscale data
         if synth_images.shape[1] == 1:
+            print("gray scale bruh")
             synth_images = synth_images.repeat(1, 3, 1, 1)  # [1, 1, 256, 256] => [1, 3, 256, 256]
 
         # Features for synth images.
         if loss_paper == 'sgan2':
-            raise ValueError("construction site - not supported for now")
-            # synth_features = vgg16(synth_images, resize_images=False, return_lpips=True)
-            # dist = (target_features - synth_features).square().sum()
-            #
-            # # Noise regularization.
-            # reg_loss = 0.0
-            # for v in noise_buffs.values():
-            #     noise = v[None, None, :, :]  # must be [1,1,H,W] for F.avg_pool2d()
-            #     while True:
-            #         reg_loss += (noise * torch.roll(noise, shifts=1, dims=3)).mean() ** 2
-            #         reg_loss += (noise * torch.roll(noise, shifts=1, dims=2)).mean() ** 2
-            #         if noise.shape[2] <= 8:
-            #             break
-            #         noise = F.avg_pool2d(noise, kernel_size=2)
-            # loss = dist + reg_loss * regularize_noise_weight
-            # # Print in the same line (avoid cluttering the commandline)
-            # n_digits = int(np.log10(num_steps)) + 1 if num_steps > 0 else 1
-            # message = f'step {step + 1:{n_digits}d}/{num_steps}: dist {dist:.7e} | loss {loss.item():.7e}'
-            # print(message, end='\r')
-            #
-            # last_status = {'dist': dist.item(), 'loss': loss.item()}
+            synth_features = vgg16(synth_images, resize_images=False, return_lpips=True)
+            dist = (target_features - synth_features).square().sum()
+
+            # Noise regularization.
+            reg_loss = 0.0
+            for v in noise_buffs.values():
+                noise = v[None, None, :, :]  # must be [1,1,H,W] for F.avg_pool2d()
+                while True:
+                    reg_loss += (noise * torch.roll(noise, shifts=1, dims=3)).mean() ** 2
+                    reg_loss += (noise * torch.roll(noise, shifts=1, dims=2)).mean() ** 2
+                    if noise.shape[2] <= 8:
+                        break
+                    noise = F.avg_pool2d(noise, kernel_size=2)
+            loss = dist + reg_loss * regularize_noise_weight
+            # Print in the same line (avoid cluttering the commandline)
+            n_digits = int(np.log10(num_steps)) + 1 if num_steps > 0 else 1
+            message = f'step {step + 1:{n_digits}d}/{num_steps}: dist {dist:.3e} | loss {loss.item():.3e}'
+            print(message)
+
+            last_status = {'dist': dist.item(), 'loss': loss.item()}
 
         elif loss_paper == 'im2sgan':
             # Uncomment to also use LPIPS features as loss (must be better fine-tuned):
@@ -235,11 +238,13 @@ def project(
             loss += reg_loss * regularize_noise_weight
             # We print in the same line (avoid cluttering the commandline)
             n_digits = int(np.log10(num_steps)) + 1 if num_steps > 0 else 1
-            message = f'step {step + 1:{n_digits}d}/{num_steps}: percept loss {percept_error.item():.7e} | ' \
-                      f'pixel mse {mse_error.item():.7e} | ssim {ssim_loss.item():.7e} | loss {loss.item():.7e}'
-            print(message, end='\r')
+            message = f'step {step + 1:{n_digits}d}/{num_steps}: percept loss {percept_error:.3e} | ' \
+                      f'pixel mse {mse_error.item():.3e} | ssim {ssim_loss.item():.3e} | loss {loss.item():.3e}'
+            print(message)  # , end='\r')
+            # print(torch.min(synth_images), torch.max(synth_images))
 
-            last_status = {'percept_error': percept_error.item(),
+            # print(synth_images[0, 0, 100, 100:150])
+            last_status = {'percept_error': percept_error,
                            'pixel_mse': mse_error.item(),
                            'ssim': ssim_loss.item(),
                            'loss': loss.item()}
@@ -269,23 +274,24 @@ def project(
             loss += reg_loss * regularize_noise_weight
             # We print in the same line (avoid cluttering the commandline)
             n_digits = int(np.log10(num_steps)) + 1 if num_steps > 0 else 1
-            message = f'step {step + 1:{n_digits}d}/{num_steps}: percept loss {percept_error.item():.7e} | ' \
+            message = f'step {step + 1:{n_digits}d}/{num_steps}: percept loss {percept_error:.7e} | ' \
                       f'pixel mse {mse_error.item():.7e} | ssim {ssim_loss.item():.7e} | loss {loss.item():.7e}'
             print(message, end='\r')
 
-            last_status = {'percept_error': percept_error.item(),
+            last_status = {'percept_error': percept_error,
                            'pixel_mse': mse_error.item(),
                            'ssim': ssim_loss.item(),
                            'loss': loss.item()}
 
         elif loss_paper == 'clip':
 
-            import torchvision.transforms as T
+            import torchvision.transforms as transforms
             synth_img = F.interpolate(synth_images, size=(224, 224), mode='area')
-            prep = T.Normalize(mean=(0.48145466, 0.4578275, 0.40821073), std=(0.26862954, 0.26130258, 0.27577711))
+            prep = transforms.Normalize(mean=(0.48145466, 0.4578275, 0.40821073),
+                                        std=(0.26862954, 0.26130258, 0.27577711))
             synth_img = prep(synth_img)
-            # synth_images = synth_images.permute(0, 2, 3, 1).clamp(0, 255).to(torch.uint8).cpu().numpy()[0]  # NCWH => WHC
-            # synth_images = preprocess(PIL.Image.fromarray(synth_images, 'RGB')).unsqueeze(0).to(device)
+            # NCWH => WHC
+            # synth_images = synth_images.permute(0, 2, 3, 1).clamp(0, 255).to(torch.uint8).cpu().numpy()[0]
             synth_features = model.encode_image(synth_img)
             dist = mse(target_features, synth_features)
 
@@ -303,13 +309,26 @@ def project(
             # Print in the same line (avoid cluttering the commandline)
             n_digits = int(np.log10(num_steps)) + 1 if num_steps > 0 else 1
             message = f'step {step + 1:{n_digits}d}/{num_steps}: dist {dist:.7e}'
-            print(message, end='\r')
+            print(message)
 
             last_status = {'dist': dist.item(), 'loss': loss.item()}
 
+        # def save_tensor_as_image(tensor):
+        #     # tensor shape is [batch_size, channels, height, width] i.e., [1, 3, 256, 256]
+        #     tensor = tensor.squeeze(0)  # remove batch dimension
+        #     # if your tensor has values range [0,1], convert it to [0,255]
+        #     # tensor = tensor.mul(255).byte()
+        #     tensor = (tensor - tensor.min()) / (tensor.max() - tensor.min())
+        #     # if your tensor is on GPU, bring it back to CPU
+        #     tensor = tensor.cpu()
+        #     img = torchvision.transforms.ToPILImage()(tensor)  # convert tensor to PIL image
+        #     img.save(shared_dir / "projected" / "hurz.png")
+        #
+        # save_tensor_as_image(synth_images)
+
         # Step
         optimizer.zero_grad(set_to_none=True)
-        loss.backward()
+        loss.backward(retain_graph=True)  # retain graph should not be needed but got an err
         optimizer.step()
 
         # Save projected W for each optimization step.
@@ -396,32 +415,24 @@ def project(
 # description to add to the experiment name', default='')
 def run_projection_sgan3_fun(
         G,
-        target_image: torch.Tensor,  # [C,H,W] and dynamic range [0,255], W & H must match G output resolution
+        target_image: np.ndarray,  # [C,H,W] and dynamic range [0,255], W & H must match G output resolution
         target_class: torch.Tensor,
-
-        network_pkl: str,
-        target_fname: str,
-
+        identifier: str,
         seed: int,
-        outdir: str,  # where to save the results :)
-        regularize_noise_weight: float = 1e5,
-
+        out_dir: Path,  # where to save the results :)
+        regularize_noise_weight: float = 1e3,  # 1e5,
         num_steps: int = 1000,
-        cfg: str = 'stylegan2',
-        initial_learning_rate: float = 0.1,
+        initial_learning_rate: float = 0.01,
         constant_learning_rate: bool = False,
-        stabilize_projection: bool = False,  # only for StyleGAN3 models
+        stabilize_projection: bool = False,  # only for StyleGAN3 models (so not for us)
         project_in_wplus: bool = True,  # def wanna try this
         start_wavg: bool = True,  # same for this
         projection_seed: int = None,  # ? see usage
-        truncation_psi: float = 0.7,  # "when using projection seed"
-        loss_paper: str = 'sgan2',  # ['sgan2', 'im2sgan', 'discriminator', 'clip'],
-        normed: bool = False,  # VGG16 feature norm, (if using "im2sgan", make sure to norm the VGG16 features)
+        truncation_psi: float = 0.95,  # "when using projection seed"
+        loss_paper: str = 'im2sgan',  # ['sgan2', 'im2sgan', 'discriminator', 'clip'],
+        normed: bool = True,  # VGG16 feature norm, (if using "im2sgan", make sure to norm the VGG16 features)
         sqrt_normed: bool = False,  # sqrt VGG16 feature norm
-        save_every_step: bool = False,  # no
-        save_video: bool = False,  # no
-        compress: bool = False,  # no
-        fps: int = 30,  # not needed
+
         description: str = '',
 ):
     """Project given image to the latent space of pretrained network pickle.
@@ -440,14 +451,6 @@ def run_projection_sgan3_fun(
             log.error(
                 'Provide a seed to start from if not starting from the midpoint. Use "--projection-seed" to do so')
 
-    # Load networks.
-    # If model name exists in the gen_utils.resume_specs dictionary, use it instead of the full url
-    try:
-        network_pkl = gen_utils.resume_specs[cfg][network_pkl]
-    except KeyError:
-        # Otherwise, it's a local file or an url
-        pass
-    # print('Loading networks from "%s"...' % network_pkl)
     device = torch.device('cuda')
     # with dnnlib.util.open_url(network_pkl) as fp:
     #     G = legacy.load_network_pkl(fp)['G_ema'].requires_grad_(False).to(device)
@@ -458,12 +461,14 @@ def run_projection_sgan3_fun(
         #     D = legacy.load_network_pkl(fp)['D'].requires_grad_(False).to(device)
 
     # Load target image.
-    target_pil = PIL.Image.open(target_fname).convert('RGB')
-    w, h = target_pil.size
-    s = min(w, h)
-    target_pil = target_pil.crop(((w - s) // 2, (h - s) // 2, (w + s) // 2, (h + s) // 2))
-    target_pil = target_pil.resize((G.img_resolution, G.img_resolution), PIL.Image.LANCZOS)
-    target_uint8 = np.array(target_pil, dtype=np.uint8)
+    # target_pil = PIL.Image.open(target_fname).convert('RGB')
+    # w, h = target_pil.size
+    # s = min(w, h)
+    # target_pil = target_pil.crop(((w - s) // 2, (h - s) // 2, (w + s) // 2, (h + s) // 2))
+    # target_pil = target_pil.resize((G.img_resolution, G.img_resolution), PIL.Image.LANCZOS)
+    # noinspection PyTypeChecker
+
+    target_uint8 = PIL.Image.fromarray(np.transpose(target_image, (1, 2, 0)))
 
     # Stabilize the latent space to make things easier (for StyleGAN3's config t and r models)
     if stabilize_projection:
@@ -473,7 +478,8 @@ def run_projection_sgan3_fun(
     start_time = perf_counter()
     projected_w_steps, run_config = project(
         G,
-        target=target_pil,
+        target=target_uint8,
+        target_class=target_class,
         num_steps=num_steps,
         initial_learning_rate=initial_learning_rate,
         constant_learning_rate=constant_learning_rate,
@@ -496,59 +502,43 @@ def run_projection_sgan3_fun(
     desc = f'{desc}-wavgstart' if start_wavg else f'{desc}-seed{projection_seed}start'
     desc = f'{desc}-{description}' if len(description) != 0 else desc
     desc = f'{desc}-{loss_paper}'
-    run_dir = gen_utils.make_run_dir(outdir, desc)
+    # run_dir = gen_utils.make_run_dir(out_dir, desc)
 
     # Save the configuration used
-    obj = {
-        'network_pkl': network_pkl,
-        'description': description,
-        'target_image': target_fname,
-        'outdir': run_dir,
-        'save_video': save_video,
-        'seed': seed,
-        'video_fps': fps,
-        'save_every_step': save_every_step,
-        'run_config': run_config
-    }
-    # Save the run configuration
-    gen_utils.save_config(obj, run_dir=run_dir)
+    # obj = {
+    #     'description': description,
+    #     'target_image': 'test',
+    #     'target_class': target_class.cpu().tolist(),
+    #     'outdir': run_dir,
+    #     'seed': seed,
+    #     'run_config': run_config
+    # }
+    # # Save the run configuration
+    # gen_utils.save_config(obj, run_dir=run_dir)
 
     # Render debug output: optional video and projected image and W vector.
-    result_name = os.path.join(run_dir, 'proj')
-    npy_name = os.path.join(run_dir, 'projected')
+    result_name = 'proj'
+    npz_name = 'latent'
     # If we project in W+, add to the name of the results
     if project_in_wplus:
-        result_name, npy_name = f'{result_name}_wplus', f'{npy_name}_wplus'
+        result_name += '_wplus'
+        npz_name += '_wplus'
     # Either in W or W+, we can start from the W midpoint or one given by the projection seed
     if start_wavg:
-        result_name, npy_name = f'{result_name}_wavg', f'{npy_name}_wavg'
+        result_name, npz_name = f'{result_name}_wavg', f'{npz_name}_wavg'
     else:
-        result_name, npy_name = f'{result_name}_seed-{projection_seed}', f'{npy_name}_seed-{projection_seed}'
+        result_name, npz_name = f'{result_name}_seed-{projection_seed}', f'{npz_name}_seed-{projection_seed}'
 
+    # print("target_uint8:", target_uint8.size)
     # Save the target image
-    target_pil.save(os.path.join(run_dir, 'target.jpg'))
+    target_uint8.save(out_dir / f'target_{identifier}.png')
 
-    if save_every_step:
-        # Save every projected frame and W vector. TODO: This can be optimized to be saved as training progresses
-        n_digits = int(np.log10(num_steps)) + 1 if num_steps > 0 else 1
-        for step in tqdm(range(num_steps), desc='Saving projection results', unit='steps'):
-            w = projected_w_steps[step]
-            synth_image = gen_utils.w_to_img(G, dlatents=w, noise_mode='const')[0]
-            PIL.Image.fromarray(synth_image, 'RGB').save(f'{result_name}_step{step:0{n_digits}d}.jpg')
-            np.save(f'{npy_name}_step{step:0{n_digits}d}.npy', w.unsqueeze(0).cpu().numpy())
-    else:
-        # Save only the final projected frame and W vector.
-        print('Saving projection results...')
-        projected_w = projected_w_steps[-1]
-        synth_image = gen_utils.w_to_img(G, dlatents=projected_w, noise_mode='const')[0]
-        PIL.Image.fromarray(synth_image, 'RGB').save(f'{result_name}_final.jpg')
-        np.save(f'{npy_name}_final.npy', projected_w.unsqueeze(0).cpu().numpy())
-
-    # Save the optimization video and compress it if so desired
-    if save_video:
-        video = imageio.get_writer(f'{result_name}.mp4', mode='I', fps=fps, codec='libx264', bitrate='16M')
-        print(f'Saving optimization progress video "{result_name}.mp4"')
-        for projected_w in projected_w_steps:
-            synth_image = gen_utils.w_to_img(G, dlatents=projected_w, noise_mode='const')[0]
-            video.append_data(np.concatenate([target_uint8, synth_image], axis=1))  # left side target, right projection
-        video.close()
+    # Save only the final projected frame and W vector.
+    projected_w = projected_w_steps[-1]
+    synth_image = gen_utils.w_to_img(G, dlatents=projected_w, noise_mode='const')[0]
+    print(synth_image[1, 100, 100: 150])
+    print(synth_image.shape, synth_image.dtype)
+    PIL.Image.fromarray(synth_image, 'RGB').save(out_dir / f'proj_{identifier}.png')
+    target_class_numpy = target_class.cpu().numpy()
+    np.savez(str(out_dir / f'{npz_name}_{identifier}.npz'), w=projected_w.unsqueeze(0).cpu().numpy(),
+             target_class=target_class_numpy)
