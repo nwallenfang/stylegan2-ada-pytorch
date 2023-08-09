@@ -34,20 +34,29 @@ activation_funcs = {
 
 #----------------------------------------------------------------------------
 
-_inited = False
 _plugin = None
+_inited = False
 _null_tensor = torch.empty([0])
+_warned = False
 
 def _init():
-    global _inited, _plugin
+    global _inited, _plugin, _warned
     if not _inited:
         _inited = True
         sources = ['bias_act.cpp', 'bias_act.cu']
         sources = [os.path.join(os.path.dirname(__file__), s) for s in sources]
-        try:
-            _plugin = custom_ops.get_plugin('bias_act_plugin', sources=sources, extra_cuda_cflags=['--use_fast_math'])
-        except:
-            warnings.warn('Failed to build CUDA kernels for bias_act. Falling back to slow reference implementation. Details:\n\n' + traceback.format_exc())
+
+        if torch.__version__.startswith('2'):
+            if not _warned:
+                warnings.warn('Plugin incompatible with PyTorch 2. Falling back to slow reference implementation')
+                _warned = True
+        else:
+            try:
+                _plugin = custom_ops.get_plugin('bias_act_plugin', sources=sources, extra_cuda_cflags=['--use_fast_math'])
+            except:
+                if not _warned:
+                    warnings.warn('Failed to build CUDA kernels for bias_act. Falling back to slow reference implementation. Details:\n\n' + traceback.format_exc())
+                    _warned = True
     return _plugin is not None
 
 #----------------------------------------------------------------------------
