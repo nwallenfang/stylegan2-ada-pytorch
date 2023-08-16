@@ -11,11 +11,13 @@ import time
 import copy
 import json
 import pickle
+import warnings
+
 import psutil
 import PIL.Image
 import numpy as np
 
-import comet_ml
+# import comet_ml
 import torch
 import dnnlib
 
@@ -130,7 +132,7 @@ def training_loop(
 ):
     # Initialize.
     start_time = time.time()
-    device = torch.device('cuda', rank)
+    device = torch.device('cuda', rank) if torch.cuda.is_available() else torch.device('cpu')
     np.random.seed(random_seed * num_gpus + rank)
     torch.manual_seed(random_seed * num_gpus + rank)
     torch.backends.cudnn.benchmark = cudnn_benchmark  # Improves training speed.
@@ -229,8 +231,11 @@ def training_loop(
         phase.start_event = None
         phase.end_event = None
         if rank == 0:
-            phase.start_event = torch.cuda.Event(enable_timing=True)
-            phase.end_event = torch.cuda.Event(enable_timing=True)
+            if torch.cuda.is_available():
+                phase.start_event = torch.cuda.Event(enable_timing=True)
+                phase.end_event = torch.cuda.Event(enable_timing=True)
+            else:
+                warnings.warn("training without cuda ;)")
 
     # Export sample images.
     grid_size = None
@@ -242,8 +247,12 @@ def training_loop(
         save_image_grid(images, os.path.join(run_dir, 'reals.png'), drange=[0, 255], grid_size=grid_size)
         grid_z = torch.randn([labels.shape[0], G.z_dim], device=device).split(batch_gpu)
         grid_c = torch.from_numpy(labels).to(device).split(batch_gpu)
-        images = torch.cat([G_ema(z=z, c=c, noise_mode='const').cpu() for z, c in zip(grid_z, grid_c)]).numpy()
-        save_image_grid(images, os.path.join(run_dir, 'fakes_init.png'), drange=[-1, 1], grid_size=grid_size)
+        print("reals saved")
+        if torch.cuda.is_available():
+            images = torch.cat([G_ema(z=z, c=c, noise_mode='const').cpu() for z, c in zip(grid_z, grid_c)]).numpy()
+            save_image_grid(images, os.path.join(run_dir, 'fakes_init.png'), drange=[-1, 1], grid_size=grid_size)
+        else:
+            warnings.warn("debugging")
 
     # Initialize logs.
     if rank == 0:
@@ -258,10 +267,10 @@ def training_loop(
             import torch.utils.tensorboard as tensorboard
             # try to upload the tensorboard metrics to comet_ml
             # please ignore its presence here.. or fix it up and generate a new one
-            experiment = comet_ml.Experiment(
-                api_key="XEhJP7MlCdIafCngPl29ZjolT",
-                project_name="StyleGAN Training"
-            )
+            # experiment = comet_ml.Experiment(
+            #     api_key="XEhJP7MlCdIafCngPl29ZjolT",
+            #     project_name="StyleGAN Training"
+            # )
             stats_tfevents = tensorboard.SummaryWriter(run_dir)
         except ImportError as err:
             print('Skipping tfevents export:', err)
@@ -289,7 +298,11 @@ def training_loop(
             all_gen_z = [phase_gen_z.split(batch_gpu) for phase_gen_z in all_gen_z.split(batch_size)]
             all_gen_c = [training_set.get_label(np.random.randint(len(training_set))) for _ in
                          range(len(phases) * batch_size)]
-            all_gen_c = torch.from_numpy(np.stack(all_gen_c)).pin_memory().to(device)
+            print(f"device: {device}")
+            if device.type == "cuda":
+                all_gen_c = torch.from_numpy(np.stack(all_gen_c)).pin_memory().to(device)
+            else:
+                all_gen_c = torch.from_numpy(np.stack(all_gen_c)).to(device)
             all_gen_c = [phase_gen_c.split(batch_gpu) for phase_gen_c in all_gen_c.split(batch_size)]
 
         # Execute training phases.

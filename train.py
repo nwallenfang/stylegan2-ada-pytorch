@@ -127,7 +127,10 @@ def setup_training_loop_kwargs(
                                                        tensor_path=data, custom_name='gc10', use_labels=True)
 
     # used to be num_workers = 2 or 3 but failed on Windows
-    args.data_loader_kwargs = dnnlib.EasyDict(pin_memory=True, num_workers=0)  # , prefetch_factor=2)
+    if torch.cuda.is_available():
+        args.data_loader_kwargs = dnnlib.EasyDict(pin_memory=True, num_workers=0)  # , prefetch_factor=2)
+    else:
+        args.data_loader_kwargs = dnnlib.EasyDict(pin_memory=False, num_workers=0)  # , prefetch_factor=2)
     try:
         training_set = dnnlib.util.construct_class_by_name(
             **args.training_set_kwargs)  # subclass of training.dataset.Dataset
