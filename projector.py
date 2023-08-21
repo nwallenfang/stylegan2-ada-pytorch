@@ -152,10 +152,8 @@ def run_projection(
         device,
         target_image_uint8: np.ndarray,
         target_class: Tensor,
-        target_classname: str,
-        projected_fname: str,
+        name: str,
         outdir: str,
-        save_video: bool,
         seed: int,
         num_steps: int
 ):
@@ -174,28 +172,18 @@ def run_projection(
         num_steps=num_steps,
         device=device
     )
-    log.info(f'Done projecting {target_classname}, elapsed: {(perf_counter() - start_time):.1f} s')
+    # log.info(f'Done projecting {target_classname}, elapsed: {(perf_counter() - start_time):.1f} s')
 
-    # Render debug output: optional video and projected image and W vector.
     os.makedirs(outdir, exist_ok=True)
-    if save_video:
-        video = imageio.get_writer(f'{outdir}/proj.mp4', mode='I', fps=10, codec='libx264', bitrate='16M')
-        print(f'Saving optimization progress video "{outdir}/proj.mp4"')
-        for projected_w in projected_w_steps:
-            synth_image = G.synthesis(projected_w.unsqueeze(0), noise_mode='const')
-            synth_image = (synth_image + 1) * (255 / 2)
-            synth_image = synth_image.permute(0, 2, 3, 1).clamp(0, 255).to(torch.uint8)[0].cpu().numpy()
-            video.append_data(np.concatenate([target_image_uint8, synth_image], axis=1))
-        video.close()
 
     # Save final projected frame and W vector.
-    # print("shape before saving hue:", target_image_uint8.shape)
-    # TODO save the multilabel vector this was projected with !!
     PIL.Image.fromarray(target_image_uint8.transpose((1, 2, 0))) \
-        .save(f'{outdir}/target_{projected_fname}.png')
+        .save(f'{outdir}/{name}_target.png')
     projected_w = projected_w_steps[-1]
     synth_image = G.synthesis(projected_w.unsqueeze(0), noise_mode='const')
     synth_image = (synth_image + 1) * (255 / 2)
     synth_image = synth_image.permute(0, 2, 3, 1).clamp(0, 255).to(torch.uint8)[0].cpu().numpy()
-    PIL.Image.fromarray(synth_image, 'RGB').save(f'{outdir}/proj_{projected_fname}.png')
-    np.savez(f'{outdir}/proj_{projected_fname}.npz', w=projected_w.unsqueeze(0).cpu().numpy())
+    PIL.Image.fromarray(synth_image, 'RGB').save(f'{outdir}/{name}_proj.png')
+    np.savez(f'{outdir}/{name}_proj.npz', w=projected_w.unsqueeze(0).cpu().numpy(), c=target_class)
+
+    return synth_image
