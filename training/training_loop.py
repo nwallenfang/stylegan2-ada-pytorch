@@ -298,7 +298,6 @@ def training_loop(
             all_gen_z = [phase_gen_z.split(batch_gpu) for phase_gen_z in all_gen_z.split(batch_size)]
             all_gen_c = [training_set.get_label(np.random.randint(len(training_set))) for _ in
                          range(len(phases) * batch_size)]
-            print(f"device: {device}")
             if device.type == "cuda":
                 all_gen_c = torch.from_numpy(np.stack(all_gen_c)).pin_memory().to(device)
             else:

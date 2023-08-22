@@ -266,5 +266,4 @@ class StyleGANDataset(Dataset):
         return self.data[raw_idx]
     
     def get_label(self, idx):
-        # TODO change get_label to return multilabel info instead of single label
         return super().get_label(idx)
